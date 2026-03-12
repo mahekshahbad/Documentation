@@ -1,9 +1,9 @@
 # Secret Scanning with TruffleHog
 
-This document describes how to implement **secret scanning using TruffleHog** within GitHub Actions workflows.  
-The objective is to detect exposed credentials such as API keys, tokens, passwords, and private keys before code is merged into protected branches.
+This document describes how secret scanning is implemented using **TruffleHog** within GitHub Actions workflows.  
+The purpose of this implementation is to detect exposed credentials such as API keys, tokens, passwords, and private keys before code is merged into protected branches.
 
-The implementation uses **custom internal modules** to ensure a standardized approach to secret scanning across repositories.
+The implementation uses **custom internal modules** designed for consistent secret scanning across repositories.
 
 ---
 
@@ -68,7 +68,7 @@ Before implementing secret scanning, ensure the following:
 
 Secret scanning is integrated into GitHub workflows using a CI job triggered during Pull Requests or code pushes.
 
-Example workflow file location:
+Example workflow location:
 
 ```
 .github/workflows/security-scan.yml
@@ -95,81 +95,103 @@ jobs:
 
       - name: Run TruffleHog Secret Scan
         run: |
-          echo "Running TruffleHog secret scan"
+          echo "Starting secret scan"
 
           trufflehog filesystem . \
             --json \
             --no-update \
-            > trufflehog-results.json
+            > scan-results.json
 ```
 
 ---
 
 ## Custom TruffleHog Module
 
-To ensure consistency across repositories, the secret scanning logic can be implemented as a **custom reusable module**.
+To maintain consistency across repositories, a **custom internal module** is used for secret scanning.
 
-Example reusable module:
+This module runs the TruffleHog scan, processes the results, and determines whether the pipeline should pass or fail.
+
+Example implementation:
 
 ```yaml
-name: Reusable TruffleHog Secret Scan
+name: Internal Secret Scan Module
 
 on:
   workflow_call:
-    inputs:
-      working-directory:
-        required: false
-        type: string
-        default: "."
 
 jobs:
   secret-scan:
     runs-on: self-hosted
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout Source Code
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      - name: Run TruffleHog Scan
-        working-directory: ${{ inputs.working-directory }}
+      - name: Prepare Scan Variables
         run: |
-          trufflehog filesystem . \
+          echo "Preparing secret scanning environment"
+          SCAN_TARGET="."
+          RESULT_FILE="scan-output.json"
+
+      - name: Execute TruffleHog Scan
+        run: |
+          echo "Running TruffleHog scan"
+
+          trufflehog filesystem "$SCAN_TARGET" \
             --json \
             --no-update \
-            > trufflehog-results.json
+            > "$RESULT_FILE" 2>&1 || true
+
+      - name: Evaluate Scan Output
+        run: |
+          echo "Evaluating scan results"
+
+          if [ -s scan-output.json ]; then
+            SECRET_TOTAL=$(grep -c '"DetectorName"' scan-output.json || echo "0")
+          else
+            SECRET_TOTAL=0
+          fi
+
+          echo "Secrets detected: $SECRET_TOTAL"
+
+          if [ "$SECRET_TOTAL" -gt 0 ]; then
+            echo "Secret scan failed"
+            exit 1
+          else
+            echo "Secret scan passed"
+          fi
 ```
 
-Benefits:
+Advantages of this module:
 
-- Centralized security configuration  
-- Consistent scanning across repositories  
-- Simplified maintenance  
-- Reduced workflow duplication  
+- Centralized implementation
+- Consistent scanning logic
+- Easier maintenance
+- Reduced duplication across repositories
 
 ---
 
 ## Advanced TruffleHog Module Implementation
 
-For improved flexibility and better result handling, an advanced module can:
+An advanced module can enhance the scanning process by:
 
-- Exclude unnecessary paths  
-- Generate JSON output  
-- Parse scan results  
-- Count detected secrets  
-- Fail the pipeline automatically  
+- Excluding unnecessary paths
+- Performing filesystem and history scans
+- Parsing scan results
+- Automatically failing the pipeline when secrets are detected
 
-Example:
+Example implementation:
 
 ```yaml
-name: Advanced TruffleHog Scan
+name: Advanced Secret Scan
 
 on:
   workflow_call:
 
 jobs:
-  trufflehog-scan:
+  trufflehog-advanced-scan:
     runs-on: self-hosted
 
     steps:
@@ -178,36 +200,36 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run Filesystem Scan
+      - name: Create Exclusion File
         run: |
-          echo ".git/" > .trufflehog-exclude
+          echo ".git/" > .scan-exclude
 
+      - name: Filesystem Secret Scan
+        run: |
           trufflehog filesystem . \
             --json \
             --no-update \
-            --exclude-paths=.trufflehog-exclude \
-            > filesystem-scan.json 2>&1 || true
+            --exclude-paths=.scan-exclude \
+            > filesystem-results.json 2>&1 || true
 
-          rm -f .trufflehog-exclude
-
-      - name: Run Git History Scan
+      - name: Git History Secret Scan
         run: |
           trufflehog git file://. \
             --json \
             --no-update \
-            > history-scan.json 2>&1 || true
+            > history-results.json 2>&1 || true
 
-      - name: Count Detected Secrets
+      - name: Validate Scan Results
         run: |
           SECRET_COUNT=$(grep -c '"DetectorName"' *.json || echo "0")
 
-          echo "Secrets detected: $SECRET_COUNT"
+          echo "Total secrets detected: $SECRET_COUNT"
 
           if [ "$SECRET_COUNT" -gt 0 ]; then
-            echo "Secret scan failed"
+            echo "Secrets detected in repository"
             exit 1
           else
-            echo "Secret scan passed"
+            echo "No secrets detected"
           fi
 ```
 
@@ -225,20 +247,20 @@ trufflehog git file://. --json --no-update
 
 Benefits:
 
-- Detects secrets committed in previous commits  
-- Identifies credentials removed later  
-- Provides deeper repository security visibility  
+- Detects secrets committed in historical commits  
+- Identifies credentials removed in later commits  
+- Provides deeper visibility into repository security  
 
 ---
 
 ## Pull Request Comment Integration
 
-To improve developer visibility, the workflow can automatically comment scan results on the Pull Request.
+To improve developer visibility, the workflow can automatically post scan results on the Pull Request.
 
-Example step:
+Example implementation:
 
 ```yaml
-- name: Comment Scan Results on PR
+- name: Comment Scan Results
   if: github.event_name == 'pull_request'
   uses: actions/github-script@v7
   with:
@@ -247,8 +269,8 @@ Example step:
 
       let message = "### TruffleHog Secret Scan Result\n\n";
 
-      if (fs.existsSync("filesystem-scan.json") && fs.statSync("filesystem-scan.json").size > 0) {
-        message += "⚠️ Potential secrets detected.\n\nCheck workflow logs.";
+      if (fs.existsSync("filesystem-results.json") && fs.statSync("filesystem-results.json").size > 0) {
+        message += "⚠️ Potential secrets detected. Please review the workflow logs.";
       } else {
         message += "✅ No secrets detected.";
       }
@@ -284,8 +306,10 @@ No Secrets Detected → Pipeline passes
 
 ## Testing the Implementation
 
+To validate the secret scanning workflow:
+
 1. Create a test branch  
-2. Add a sample secret  
+2. Add a file containing a sample credential  
 
 Example:
 
@@ -294,8 +318,8 @@ const SECRET_KEY = "TEST_SECRET_1234";
 ```
 
 3. Create a Pull Request  
-4. Verify workflow triggers  
-5. Confirm the secret scan detects the credential  
+4. Verify the workflow execution  
+5. Confirm that the secret scan detects the credential  
 
 ---
 
