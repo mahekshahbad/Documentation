@@ -1,0 +1,24 @@
+name: Security Scan
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  trufflehog-scan:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Run TruffleHog Secret Scan
+        run: |
+          echo "Starting secret scan"
+
+          trufflehog filesystem . \
+            --json \
+            --no-update \
+            > scan-results.json
